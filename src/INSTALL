@@ -1,0 +1,40 @@
+macOS users that want to use the prebuilt binaries may see an error stating
+that the application "can’t be opened because it is from an unidentified
+developer".
+
+To resolve this the "xattr -cr" command must be run on the application from the
+Terminal. The Terminal app can be opened from Finder Go->Utilities->Terminal or
+Spotlight search Terminal. Once Terminal is open, run "xattr -cr" appending the
+location of the application (without quotes).
+
+In most cases it is sufficient to simply copy and paste the following command
+into the Terminal:
+
+        xattr -cr ~/Downloads/mac_modtools*
+
+To install the rezexplode/rezpack commands on your system, copy and paste the
+following command into the Terminal:
+
+        xattr -cr ~/Downloads/mac_modtools*
+	unzip ~/Downloads/mac_modtools*
+	cd mac_modtools*
+	sudo install -d /usr/local/bin
+	sudo install rezexplode rezpack /usr/local/bin
+
+COMPILING
+
+Under macOS the command line Xcode tools must be installed. Then rezexplode and
+rezpack can be built with:
+
+	tar zxvf modtools-src*
+	cd src
+	make
+	sudo make install
+
+The build commands are very similar for Linux:
+
+	tar zxvf modtools-src*
+	cd src
+	make CFLAGS="-Wall -O2 -D_GNU_SOURCE"
+	sudo make install
+
