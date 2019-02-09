@@ -48,7 +48,7 @@ done
 
 for dir in "$REZ_WORKING_DIR"/*; do
 	file=`basename "$dir".brz`
-	"$REZ_PATH" -p -o "$REZ_WORKING_PATH"/"$file" "$dir"
+	"$REZ_PATH" -p -o "$REZ_WORKING_PATH"/"$file" "$dir"/
 done
 
 rm -rf "$REZ_WORKING_DIR"
