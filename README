@@ -1,16 +1,16 @@
 
-This is rezexplode and rezpack for macOS, FreeBSD and Linux. macOS binaries
-are included in this distribution.
+This package contains rezexplode and rezpack for macOS, FreeBSD and Linux. macOS
+binaries are included in this distribution.
 
 The latest version of this software can be obtained from:
-http://modtools.roszkowski.org
+https://modtools.roszkowski.org
 
 These tools can be used in the same way as the Windows versions that are
-included in the CMx2 products from Battlefront.com. Input file(s) can be copied 
+included in the CMx2 products from Battlefront.com. Input file(s) can be copied
 into the "input" directory and the tool launched by double clicking it from
 Finder.
 
-rezexplode will explode the input BRZ file(s) into the "exploded" directory.
+rezexplode will extract the input BRZ file(s) into the "exploded" directory.
 rezpack will pack all the files in the input directory into "packed.brz".
 
 Additional functionality is available from the command line. Install the tools
@@ -25,12 +25,21 @@ SYNOPSIS
 DESCRIPTION
 
 The file operand(s) may be zero or more files or directories. rezexplode will
-explode (unpack) each specified BRZ file or recursively search each specified
+extract (unpack) each specified BRZ file or recursively search each specified
 directory for BRZ files and explode each. rezpack will pack each file specified
 or recursively pack files in each directory specified. If no file operands are
 given then the "input" directory is used by default.
 
 The following options are available:
+
+	-x		Extract the file(s) inside a BRZ. This is the default
+			if the command is rezexplode.
+
+	-p		Pack file(s) into a BRZ file. This is the default if
+			the command is rezpack.
+
+	-l		List the contents of BRZ file(s). This is the default
+			if the command is rezlist.
 
 	-i <pattern>	Only include filenames that match this pattern.
 			The exclude pattern takes precedence over the include
@@ -40,23 +49,17 @@ The following options are available:
 
 	-h		Show usage.
 
-	-o <file>	Output file or directory. If not specified the the
-			default is "explode" for rezexplode and "packed.brz"
-			for rezpack.
+	-o <file>	Output file or directory. If not specified the default
+			is "explode" for rezexplode and "packed.brz" for
+			rezpack.
 
-	-l		List the contents of BRZ file(s).
-
-	-p		Pack file(s) into a BRZ file. This is the default if
-			the command is rezpack.
-
-	-x		Explode the file(s) inside a BRZ. This is the default
-			if the command is rezexplode.
+	-v		Verbose output.
 
 	-V		Show version.
 
 NOTES
 
-rezexplode will explode (unpack) from standard input if the input file is '-'.
+rezexplode will extract (unpack) from standard input if the input file is '-'.
 rezpack will pack to standard output if the output file is '-'.
 
 EXIT STATUS
@@ -67,8 +70,7 @@ EXAMPLES
 
 List the contents of "normandy v311.brz":
 
-rezexplode -l "/Applications/CM Battle for Normandy/CM Battle for Normandy.app/Contents/Resources/Data/normandy v311.brz"
-	size name
+rezexplode -lv "/Applications/CM Battle for Normandy/CM Battle for Normandy.app/Contents/Resources/Data/normandy v311.brz"
       829854 normandy v311/flakpz 38/flakpanzer38t-lod-2.mdr
        68968 normandy v311/flakpz 38/flakpanzer38t-lod-4.mdr
      1563075 normandy v311/flakpz 38/flakpanzer38t.mdr
@@ -91,7 +93,7 @@ rezexplode -l "/Applications/CM Battle for Normandy/CM Battle for Normandy.app/C
 
 List all "*kubelwagen*" resources in all CMBN BRZ files:
 
-rezexplode -l "/Applications/CM Battle for Normandy/CM Battle for Normandy.app/Contents/Resources/Data" | grep -i kubelwagen
+rezexplode -lv -i "*kubelwagen*" "/Applications/CM Battle for Normandy/CM Battle for Normandy.app/Contents/Resources/Data"
        65592 b/vehicles/kubelwagen/kubelwagen-alpha.bmp
      6291512 b/vehicles/kubelwagen/kubelwagen-hull.bmp
       157406 b/vehicles/kubelwagen/kubelwagen-lod-1.mdr
@@ -109,11 +111,24 @@ rezexplode -l "/Applications/CM Battle for Normandy/CM Battle for Normandy.app/C
 Explode all "*kubelwagen*" files except "*.mdr" from all CMBN BRZ files into
 the "my-kubelwagen-mod" directory.
 
-rezexplode -i "*kubelwagen*" -e "*.mdr" -o my-kubelwagen-mod "/Applications/CM Battle for Normandy/CM Battle for Normandy.app/Contents/Resources/Data"
+rezexplode -v -i "*kubelwagen*" -e "*.mdr" -o my-kubelwagen-mod "/Applications/CM Battle for Normandy/CM Battle for Normandy.app/Contents/Resources/Data"
+b/vehicles/kubelwagen/kubelwagen-alpha.bmp
+b/vehicles/kubelwagen/kubelwagen-hull.bmp
+b/vehicles/kubelwagen/kubelwagen-wheel.bmp
+b/vehicles/kubelwagen/silhouette kubelwagen.bmp
+vehicles/kubelwagen/kubelwagen-hull_normal map.bmp
+vehicles/kubelwagen/kubelwagen-wheel.bmp
+vehicles/kubelwagen/kubelwagen-wheel_normal map.bmp
 
 Pack all files in the "my-kubelwagen-mod" directory into "my-kubelwagen-mod.brz"
 
-rezpack -o my-kubelwagen-mod.brz my-kubelwagen-mod
+rezpack -v -o my-kubelwagen-mod.brz my-kubelwagen-mod
+my-kubelwagen-mod/b/vehicles/kubelwagen/kubelwagen-alpha.bmp
+my-kubelwagen-mod/b/vehicles/kubelwagen/kubelwagen-hull.bmp
+my-kubelwagen-mod/b/vehicles/kubelwagen/silhouette kubelwagen.bmp
+my-kubelwagen-mod/vehicles/kubelwagen/kubelwagen-hull_normal map.bmp
+my-kubelwagen-mod/vehicles/kubelwagen/kubelwagen-wheel.bmp
+my-kubelwagen-mod/vehicles/kubelwagen/kubelwagen-wheel_normal map.bmp
 
 BUGS
 

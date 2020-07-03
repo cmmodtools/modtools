@@ -33,12 +33,17 @@ find_rez() {
 }
 find_rez
 
+echo "removing directory $REZ_WORKING_DIR"
 rm -rf "$REZ_WORKING_DIR"
 
+echo "extracting files into $REZ_WORKING_DIR"
+
 for file in "${@:-${REZ_DEFAULT_SRC[@]}}"; do
-	dir=`basename -s .brz "$file"`
-	"$REZ_PATH" -x -o "$REZ_WORKING_DIR"/"$dir" "$file"
+	echo "extracting $file"
+	"$REZ_PATH" -xo "$REZ_WORKING_DIR"/"`basename -s .brz "$file"`" "$file"
 done
+
+echo -n "finding unused brz contents..."
 
 find "$REZ_WORKING_DIR" -type f -exec basename {} \; | sort -f | uniq -d -i \
 	| while read dup; do
@@ -46,9 +51,12 @@ find "$REZ_WORKING_DIR" -type f -exec basename {} \; | sort -f | uniq -d -i \
 		| xargs -I{} rm {}
 done
 
+echo "done."
+
 for dir in "$REZ_WORKING_DIR"/*; do
-	file=`basename "$dir".brz`
-	"$REZ_PATH" -p -o "$REZ_WORKING_PATH"/"$file" "$dir"/
+	echo "packing $dir"
+	"$REZ_PATH" -p -o "$REZ_WORKING_PATH"/"`basename "$dir".brz`" "$dir"/
 done
 
+echo "removing directory $REZ_WORKING_DIR"
 rm -rf "$REZ_WORKING_DIR"

@@ -1,6 +1,6 @@
 /* main.c -- rezexplode and rezpack CMx2 BRZ resource files
 
-   Copyright (C) 2013-2018 Michal Roszkowski
+   Copyright (C) 2013-2020 Michal Roszkowski
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -36,7 +36,7 @@
 
 #define IS_STDIO(s) (strcmp((s), REZ_STDIO_FILE) == 0)
 
-#define VERSION "1.3 Copyright (C) 2013-2018 by Michal Roszkowski"
+#define VERSION "1.3.1 Copyright (C) 2013-2020 by Michal Roszkowski"
 
 static const char *progname;
 static char *cwd, *working;
@@ -49,13 +49,12 @@ static char *rez_strlcat(const char *s1, const char *s2, size_t n);
 
 struct commands {
 	const char *const name;
-	int (*const fn)(char *const *, char const *,
-		  filterfn_t *, filter_init_t *, filter_fini_t *, void *);
+	int (*const fn)(char *const *, int, brz_filter_t *, char const *);
 	const char *const dfl_out;
 };
 
 static const struct commands do_it[] = {
-	{"rezexplode", brz_explode, REZ_DEFAULT_DST_DIR},
+	{"rezexplode", brz_extract, REZ_DEFAULT_DST_DIR},
 	{"rezpack", brz_pack, REZ_DEFAULT_DST_FILE},
 	{"rezlist", (void *)brz_list, NULL},
 	{NULL, NULL, NULL}
@@ -65,11 +64,17 @@ enum command { REZ_EXPLODE, REZ_PACK, REZ_LIST, REZ_NONE, REZ_INVALID };
 
 int main(int argc, char **argv)
 {
-	int ch, rval;
+	int ch, rval, flags = 0;
 	enum command cmd;
 	char **inputv, *output;
 	struct sigaction cleanup_sa;
 	brz_filter_args_t args;
+	brz_filter_t filter = {
+			.flt_fn   = brz_filter,
+			.flt_init = brz_filter_init,
+			.flt_fini = brz_filter_fini,
+			.flt_arg  = &args
+	};
 
 	progname = brz_basename(argv[0]);
 
@@ -77,7 +82,7 @@ int main(int argc, char **argv)
 	output = NULL;
 	memset(&args, 0, sizeof(args));
 
-	while ((ch = getopt(argc, argv, REZ_COMMANDS "di:e:ho:V")) != -1) {
+	while ((ch = getopt(argc, argv, REZ_COMMANDS "di:e:ho:vV")) != -1) {
 		switch(ch) {
 		case 'd':
 			args.flags |= BRZ_FILTER_FLAG_KEEPDUPS;
@@ -94,6 +99,12 @@ int main(int argc, char **argv)
 		case 'o':
 			output = optarg;
 			break;
+		case 'v':
+			flags |= BRZ_FLAG_VERBOSE;
+			break;
+		case 'V':
+			version();
+			return 0;
 		case 'l':
 			cmd = (cmd != REZ_NONE)? REZ_INVALID : REZ_LIST;
 			break;
@@ -103,9 +114,6 @@ int main(int argc, char **argv)
 		case 'x':
 			cmd = (cmd != REZ_NONE)? REZ_INVALID : REZ_EXPLODE;
 			break;
-		case 'V':
-			version();
-			return 0;
 		default:
 			usage();
 			return -1;
@@ -168,21 +176,23 @@ cmd_ok:
 
 	if (cmd == REZ_EXPLODE && !output) {
 		fprintf(stderr,
-			"%s: Cannot explode to standard output\n", progname);
+			"%s: Cannot extract to standard output\n", progname);
 		return -1;
 	}
 
 	if (cmd == REZ_PACK && !inputv) {
 		fprintf(stderr,
-			"%s: Cannot pack standard input\n", progname);
+			"%s: Cannot pack from standard input\n", progname);
 		return -1;
 	}
 
-	if (cmd == REZ_LIST &&
-		    (output || args.flags || args.excl || args.incl)) {
-		fprintf(stderr,
-			"%s: Invalid combination of options\n", progname);
-		return -1;
+	if (cmd == REZ_LIST) {
+		args.flags |= BRZ_FILTER_FLAG_KEEPDUPS;
+		if (output) {
+			fprintf(stderr,
+				"%s: Cannot specify -o parameter\n", progname);
+			return -1;
+		}
 	}
 
 	if (output != working) {
@@ -216,8 +226,7 @@ cmd_ok:
 	argc -= optind;
 	argv += optind;
 
-	rval = do_it[cmd].fn(inputv, working,
-		     &brz_filter, &brz_filter_init, &brz_filter_fini, &args);
+	rval = do_it[cmd].fn(inputv, flags, &filter, working);
 
 	if (rval < 0) {
 		perror(NULL);
@@ -251,14 +260,15 @@ static void usage(void)
 {
 	fprintf(stderr, "Usage: %s [options] [file] ...\n", progname);
 	fputs(
-		"\t-d\t\tpack duplicate filenames\n"
+		"\t-x\t\textract file(s)\n"
+		"\t-p\t\tpack file(s)\n"
+		"\t-l\t\tlist contents of file(s)\n"
+		"\t-d\t\tinclude duplicate filenames\n"
 		"\t-i <pattern>\tfilename include pattern\n"
 		"\t-e <pattern>\tfilename exclude pattern\n"
 		"\t-h\t\tshow usage\n"
 		"\t-o <file>\toutput file or directory\n"
-		"\t-l\t\tlist contents of file(s)\n"
-		"\t-p\t\tpack file(s)\n"
-		"\t-x\t\texplode file(s)\n"
+		"\t-v\t\tverbose output\n"
 		"\t-V\t\tshow version\n"
 		, stderr);
 }

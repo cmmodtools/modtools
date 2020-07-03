@@ -1,6 +1,6 @@
 /* brz.c -- manipulate CMx2 BRZ resource files
 
-   Copyright (C) 2013-2018 Michal Roszkowski
+   Copyright (C) 2013-2020 Michal Roszkowski
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -46,9 +46,9 @@ typedef  int32_t brz_off_t;
 
 #define BRZ_SIZEOF_STR(s)	(sizeof(brz_str_t) + (s)->len)
 #define BRZ_SIZEOF_HEADER(h) 	(sizeof(brz_header_t) +			\
-				 sizeof(brz_file_t) * (h)->header.nfiles)
+				 sizeof(brz_file_t) * (h)->prefix.nfiles)
 
-#define BRZ_LEN(h)		((h)->file[(h)->header.nfiles].offset)
+#define BRZ_LEN(h)		((h)->file[(h)->prefix.nfiles].offset)
 #define BRZ_FILE_LEN(h, n)	(((h)->file[(n) + 1].offset) -		\
 				 ((h)->file[n].offset))
 
@@ -61,6 +61,16 @@ typedef  int32_t brz_off_t;
 #define BRZ_FILE_DIR(f)		(*(brz_str_t *)((void *)&BRZ_FILE_NAME(f) + \
 				 BRZ_SIZEOF_STR(&BRZ_FILE_NAME(f))))
 
+#define BRZ_FILE_FPRINT(s, f)	fprintf((s), "%.*s%c%.*s",		\
+					     (int)(f)->dir_len, (f)->dir, \
+					     (f)->dir_len > 0? '/':'\0',\
+					     (int)(f)->name_len, (f)->name)
+
+#define BRZ_PREFIX_INIT(p)	do {					\
+					(p)->magic = BRZ_MAGIC;		\
+					(p)->nfiles = 0;		\
+				} while (0)
+
 #define BRZ_FILE_INIT(f)	do {					\
 					(f)->name_len = (f)->dir_len = 0; \
 					(f)->_path = NULL;		\
@@ -69,7 +79,7 @@ typedef  int32_t brz_off_t;
 typedef struct __attribute__((packed)) {
 	brz_uint_t magic;
 	brz_uint_t nfiles;
-} brz_hdr_t;
+} brz_prefix_t;
 
 typedef struct {
 	brz_off_t offset;
@@ -81,219 +91,221 @@ typedef struct {
 } brz_file_t;
 
 typedef struct {
-	brz_hdr_t header;
+	brz_prefix_t prefix;
 	brz_file_t file[1];
 } brz_header_t;
+
+typedef struct {
+	brz_header_t *header;
+	union {
+		int fd;
+		FILE *fp;
+	} file;
+} brz_t;
 
 typedef struct __attribute__((packed)) {
 	brz_strlen_t len;
 	char str[];
 } brz_str_t;
 
-static int brz_explode_ftsent(FTS *fts, FTSENT *f, void *arg);
+static int brz_extract_ftsent(FTS *fts, FTSENT *f, void *arg);
 static int brz_add_ftsent(FTS *fts, FTSENT *f, void *arg);
 static int brz_fprint_ftsent(FTS *fts, FTSENT *f, void *arg);
-static int brz_explode_file(FILE *brz,
-			    filterfn_t *filterfn,
-			    filter_init_t *filter_init,
-			    filter_fini_t *filter_fini,
-			    void *arg);
-static int brz_fprint_file(FILE *brz, FILE *stream);
+static int brz_extract_file(FILE *brz, int flags, brz_filter_t *filter);
+static int brz_file_fwrite(brz_t *brz, brz_uint_t i, void *arg);
+static int brz_fprint_file(FILE *brz, int flags,
+			   brz_filter_t *filter, FILE *stream);
+static int brz_file_vfprint(brz_t *brz, brz_uint_t i, FILE *stream);
+static int brz_file_fprint(brz_t *brz, brz_uint_t i, FILE *stream);
+static brz_t *brz_alloc(FILE *stream);
+static void brz_free(brz_t *brz);
 static brz_header_t *brz_read_header(FILE *brz);
-static size_t brz_write_header(brz_header_t *brz, FILE *stream);
-static void brz_free_header(brz_header_t *brz);
+static size_t brz_write_header(brz_header_t *hdr, FILE *stream);
+static void brz_free_header(brz_header_t *hdr);
 static inline void brz_free_header_file(brz_file_t *file);
-static size_t brz_header_len(brz_header_t *brz);
-static int brz_header_lens2offs(brz_header_t *brz);
-static brz_uint_t brz_header_filter(brz_header_t *brz,
-				    filterfn_t *filterfn,
-				    void *filter_args);
+static size_t brz_header_len(brz_header_t *hdr);
+static int brz_header_lens2offs(brz_header_t *hdr);
+static ssize_t brz_header_filter(brz_header_t *hdr, brz_filter_t *filter);
+static ssize_t brz_header_walk(brz_t *brz,
+			       brz_filter_t *filter,
+			       int (*fn)(brz_t *, brz_uint_t, void *),
+			       void *fn_arg);
 static void _brz_replace_ch(char *s, int old_ch, int new_ch);
 static void _brz_path_dos2unix(char *path);
 static void _brz_path_unix2dos(char *path);
 
-struct explode_args {
-	int ed;			/* explode directory */
+struct extract_args {
+	int flags;
+	brz_filter_t *filter;
+	int ed;			/* extract directory */
 	int wd;			/* working directory */
-	filterfn_t *filterfn;
-	filter_init_t *filter_init; /* constructor */
-	filter_fini_t *filter_fini; /* destructor */
-	void *filter_args;
 };
 
-int brz_explode(char *const *pathv,
-		const char *explode_dir,
-		filterfn_t *filterfn,
-		filter_init_t *filter_init,
-		filter_fini_t *filter_fini,
-		void *filter_args)
-{
-	struct explode_args args;
-	int c, err = 0, rval = 0;
+struct print_args {
+	int flags;
+	brz_filter_t *filter;
+	FILE *stream;
+};
 
-	if (brz_mkdir_p(explode_dir, BRZ_DIR_MODE) == -1 &&
+int brz_extract(char *const *pathv,
+		int flags,
+		brz_filter_t *filter,
+		const char *out_dir)
+{
+	struct extract_args args;
+	int c, err = 0;
+
+	if (brz_mkdir_p(out_dir, BRZ_DIR_MODE) == -1 &&
 	    errno != EEXIST)
 		return -1;
 
-	args.ed = open(explode_dir, O_RDONLY);
+	args.ed = open(out_dir, O_RDONLY);
 	args.wd = open(".", O_RDONLY);
-	args.filterfn = filterfn;
-	args.filter_init = filter_init;
-	args.filter_fini = filter_fini;
-	args.filter_args = filter_args;
 
 	if (!pathv) {
-		if (fchdir(args.ed)) {
+		if (fchdir(args.ed))
 			err = errno;
-			rval = -1;
-		}
-		while (!rval && (c = getc(stdin)) != EOF) {
+
+		while (!err && (c = getc(stdin)) != EOF) {
 			ungetc(c, stdin);
-			rval = brz_explode_file(stdin,
-						filterfn,
-						filter_init,
-						filter_fini,
-						filter_args);
-			if (rval < 0)
+			if (brz_extract_file(stdin, flags, filter) < 0)
 				err = errno;
 		}
-		if (fchdir(args.wd)) {
+
+		if (fchdir(args.wd))
 			err = errno;
-			rval = -1;
-		}
+
 	} else {
-		if ((rval =
-		    fts_tree_walk(pathv, brz_explode_ftsent, &args)) < 0)
+		args.flags = flags;
+		args.filter = filter;
+
+		if (fts_tree_walk(pathv, brz_extract_ftsent, &args) < 0)
 			err = errno;
 	}
 
 	close(args.ed);
 	close(args.wd);
 
-	errno = err;
-	return rval;
+	if (err != 0) {
+		errno = err;
+		return -1;
+	}
+	return 0;
 }
 
 int brz_pack(char *const *pathv,
-	     const char *pack_file,
-	     filterfn_t *filterfn,
-	     filter_init_t *filter_init,
-	     filter_fini_t *filter_fini,
-	     void *filter_args)
+	     int flags,
+	     brz_filter_t *filter,
+	     const char *out_file)
 {
-	FILE *file;
+	FILE *file, *stream;
 	void *buf;
 	int fd;
 	size_t len;
 	brz_header_t *p;
 	brz_uint_t i;
-	int err = 0, rval = 0;
+	int err = 0;
 
 	if (!(p = malloc(sizeof(brz_header_t))))
 		return -1;
 
-	p->header.magic = BRZ_MAGIC;
-	p->header.nfiles = 0;
+	BRZ_PREFIX_INIT(&p->prefix);
 	BRZ_FILE_INIT(&p->file[0]);
 
 	if (fts_tree_walk(pathv, brz_add_ftsent, &p) ||
-	    (filter_init && filter_init(p->header.nfiles, filter_args))) {
+	      brz_header_filter(p, filter) == -1) {
 		err = errno;
-		rval = -1;
 		goto free;
 	}
 
-	brz_header_filter(p, filterfn, filter_args);
-
-	if ((rval = brz_header_lens2offs(p)) != 0)
+	if (brz_header_lens2offs(p)) {
 		err = EFBIG;
-
-	if (filter_fini)
-		filter_fini(filter_args);
-
-	if (rval != 0) {
-		rval = -1;
 		goto free;
 	}
 
-	if (!p->header.nfiles)
-		goto free;
-
-	if (!(file = (pack_file)? fopen(pack_file, "wb") : stdout)) {
+	if (!(file = (out_file)? fopen(out_file, "wb") : stdout)) {
 		err = errno;
-		rval = -1;
 		goto free;
 	}
 
 	if (!brz_write_header(p, file)) {
 		err = errno;
-		rval = -1;
 		goto fclose;
 	}
 
-	for (i = 0; !rval && i < p->header.nfiles; i++) {
+	for (i = 0, stream = (file == stdout)? stderr : stdout;
+	     !err && i < p->prefix.nfiles;
+	     i++) {
 		len = BRZ_FILE_LEN(p, i);
+
+		if (flags & BRZ_FLAG_VERBOSE) {
+			BRZ_FILE_FPRINT(stream, &p->file[i]);
+			fputc('\n', stream);
+			fflush(stream);
+		}
 
 		if ((fd = open(p->file[i]._path, BRZ_OPEN_READ)) == -1) {
 			err = errno;
-			rval = -1;
 			continue;
 		}
 
 		if ((buf = mmap(0, len, PROT_READ, MAP_SHARED, fd, 0))
-			== MAP_FAILED) {
+		      == MAP_FAILED) {
 			err = errno;
-			rval = -1;
 			goto close;
 		}
 
 		if (!fwrite(buf, len, 1, file)) {
 			err = EIO;
-			rval = -1;
 		}
 
 		munmap(buf, len);
 	close:
 		if (close(fd)) {
 			err = errno;
-			rval = -1;
 		}
 	}
 
 fclose:
-	if (pack_file &&
+	if (out_file &&
 	    (ftruncate(fileno(file), BRZ_LEN(p)) | (fclose(file) == EOF))) {
 		err = errno;
-		rval = -1;
 	}
 free:
 	brz_free_header(p);
-	if (rval < 0)
+	if (err != 0) {
 		errno = err;
-	return rval;
+		return -1;
+	}
+	return 0;
 }
 
-int brz_list(char *const *pathv)
+int brz_list(char *const *pathv, int flags, brz_filter_t *filter)
 {
 	int c, rval = 0;
 
 	if (!pathv) {
 		while (!rval && (c = getc(stdin)) != EOF) {
 			ungetc(c, stdin);
-			rval = brz_fprint_file(stdin, stdout);
+			rval = brz_fprint_file(stdin, flags, filter, stdout);
 		}
 	} else {
-		rval = fts_tree_walk(pathv, brz_fprint_ftsent, stdout);
+		struct print_args args = {
+			.flags = flags,
+			.filter = filter,
+			.stream = stdout
+		};
+		rval = fts_tree_walk(pathv, brz_fprint_ftsent, &args);
 	}
 
 	return rval;
 }
 
-static int brz_explode_ftsent(FTS *fts, FTSENT *f, void *arg)
+static int brz_extract_ftsent(FTS *fts, FTSENT *f, void *arg)
 {
-	struct explode_args *args = arg;
+	struct extract_args *args = arg;
 	FILE *file;
-	int err = 0, rval = 0;
+	int rval, err = 0;
 
 	if (!is_brz_file(f))
 		return 0;
@@ -307,11 +319,8 @@ static int brz_explode_ftsent(FTS *fts, FTSENT *f, void *arg)
 		goto close;
 	}
 
-	rval = brz_explode_file(file,
-				args->filterfn,
-				args->filter_init,
-				args->filter_fini,
-				args->filter_args);
+	rval = brz_extract_file(file, args->flags, args->filter);
+
 	if (rval < 0)
 		err = errno;
 
@@ -321,15 +330,15 @@ static int brz_explode_ftsent(FTS *fts, FTSENT *f, void *arg)
 	}
 close:
 	fclose(file);
-	if (rval < 0)
+	if (err != 0)
 		errno = err;
 	return rval;
 }
 
 static int brz_add_ftsent(FTS *fts, FTSENT *f, void *arg)
 {
-	brz_header_t *sp, **brz = arg;
-	brz_file_t *new;
+	brz_header_t *sp, **hdr = arg;
+	brz_file_t *file;
 
 	if (f->fts_info == FTS_D) {
 		if (f->fts_level > FTS_ROOTLEVEL && f->fts_name[0] == '.') {
@@ -351,43 +360,44 @@ static int brz_add_ftsent(FTS *fts, FTSENT *f, void *arg)
 		return 0;
 
 	/* check for overflow */
-	if (sizeof((*brz)->file->offset < sizeof(f->fts_statp->st_size)) &&
-	   (typeof((*brz)->file->offset))f->fts_statp->st_size !=
+	if (sizeof((*hdr)->file->offset < sizeof(f->fts_statp->st_size)) &&
+	   (typeof((*hdr)->file->offset))f->fts_statp->st_size !=
 					 f->fts_statp->st_size) {
 		errno = EFBIG;
 		return -1;
 	}
 
-	(*brz)->header.nfiles++;
-	if ((*brz = realloc(sp = *brz, BRZ_SIZEOF_HEADER(*brz))) == NULL) {
-		(*brz = sp)->header.nfiles--;
+	(*hdr)->prefix.nfiles++;
+	if ((*hdr = realloc(sp = *hdr, BRZ_SIZEOF_HEADER(*hdr))) == NULL) {
+		(*hdr = sp)->prefix.nfiles--;
 		return -1;
 	}
 
-	new = &(*brz)->file[(*brz)->header.nfiles - 1];
-	BRZ_FILE_INIT(&(*brz)->file[(*brz)->header.nfiles]);
+	file = &(*hdr)->file[(*hdr)->prefix.nfiles - 1];
+	BRZ_FILE_INIT(&(*hdr)->file[(*hdr)->prefix.nfiles]);
 
-	if ((new->_path = malloc(f->fts_pathlen + 1)) == NULL) {
+	if ((file->_path = malloc(f->fts_pathlen + 1)) == NULL) {
 		errno = ENOMEM;
-		(*brz)->header.nfiles--;
+		(*hdr)->prefix.nfiles--;
 		return -1;
 	}
 
-	memcpy(new->_path, f->fts_path, f->fts_pathlen + 1);
+	memcpy(file->_path, f->fts_path, f->fts_pathlen + 1);
 
-	new->offset = (typeof(new->offset))f->fts_statp->st_size;
-	new->name_len = f->fts_namelen;
-	new->name = new->_path + f->fts_pathlen - new->name_len;
-	new->dir_len = f->fts_parent->fts_number;
-	new->dir = new->_path + FTS_DIRLEN(f) - new->dir_len;
+	file->offset = (typeof(file->offset))f->fts_statp->st_size;
+	file->name_len = f->fts_namelen;
+	file->name = file->_path + f->fts_pathlen - file->name_len;
+	file->dir_len = f->fts_parent->fts_number;
+	file->dir = file->_path + FTS_DIRLEN(f) - file->dir_len;
 
 	return 0;
 }
 
 static int brz_fprint_ftsent(FTS *fts, FTSENT *f, void *arg)
 {
+	struct print_args *args = arg;
 	FILE *file;
-	int rval;
+	int rval, err;
 
 	if (!is_brz_file(f))
 		return 0;
@@ -395,130 +405,173 @@ static int brz_fprint_ftsent(FTS *fts, FTSENT *f, void *arg)
 	if (!(file = fopen(f->fts_accpath, "rb")))
 		return -1;
 
-	rval = brz_fprint_file(file, (FILE *)arg);
+	if ((rval = brz_fprint_file(file, args->flags, args->filter,
+				    args->stream)))
+		err = errno;
 
 	fclose(file);
+	if (rval)
+		errno = err;
+
 	return rval;
 }
 
-static int brz_explode_file(FILE *brz,
-			    filterfn_t *filterfn,
-			    filter_init_t *filter_init,
-			    filter_fini_t *filter_fini,
-			    void *arg)
+struct file_fwrite_args {
+	int flags;
+	flt_fn_t *flt_fn;
+	void *flt_arg;
+};
+
+static int brz_file_fwrite(brz_t *brz, brz_uint_t i, void *arg)
 {
-	brz_header_t *p;
-	int err = 0, rval = 0;
-	brz_uint_t i;
-	size_t n;
+	struct file_fwrite_args *args = arg;
+	int fd, err = 0, rval = 0;
+	void *buf;
+	char *dir;
+	size_t file_len = BRZ_FILE_LEN(brz->header, i);
 
-	if (!(p = brz_read_header(brz)))
-		return -1;
+	if (args->flt_fn &&
+	    args->flt_fn(brz->header->file[i].name, i, args->flt_arg)
+	      == BRZ_FLT_MATCH)
+		goto skip;
 
-	if (filter_init && filter_init(p->header.nfiles, arg)) {
+	if (args->flags & BRZ_FLAG_VERBOSE) {
+		BRZ_FILE_FPRINT(stdout, &brz->header->file[i]);
+		putchar('\n');
+		fflush(stdout);
+	}
+
+	while ((fd = open(brz->header->file[i]._path, BRZ_OPEN_CREAT,
+			  BRZ_FILE_MODE)) == -1)
+		if (errno != ENOENT ||
+		    (dir = strndup(brz->header->file[i].dir,
+				   brz->header->file[i].dir_len)) == NULL ||
+		    (rval = brz_mkdir_p(dir, BRZ_DIR_MODE), free(dir),
+		     rval == -1)) {
+			err = errno;
+			rval = -1;
+			goto skip;
+		}
+
+	if (ftruncate(fd, file_len) ||
+	    (buf = mmap(0, file_len, PROT_WRITE, MAP_SHARED, fd, 0))
+		 == MAP_FAILED) {
 		err = errno;
 		rval = -1;
+		goto close;
+	}
+
+	if (!fread(buf, file_len, 1, brz->file.fp)) {
+		err = ferror(brz->file.fp)? EIO : EFTYPE;
+		rval = -1;
+	}
+
+	munmap(buf, file_len);
+close:
+	if (close(fd))
+		err = errno;
+
+	if (rval < 0) {
+skip:
+		brz_skip(brz->file.fp, file_len);
+		errno = err;
+	}
+
+	return rval;
+}
+
+static int brz_extract_file(FILE *stream, int flags, brz_filter_t *filter)
+{
+	int err, rval;
+	brz_t *brz;
+	brz_filter_t filter_init;
+	struct file_fwrite_args fw_args = { .flags = flags };
+
+	if (!(brz = brz_alloc(stream)))
+		return -1;
+
+	if (filter) {
+		fw_args.flt_fn = filter->flt_fn;
+		fw_args.flt_arg = filter->flt_arg;
+
+		memcpy(&filter_init, filter, sizeof(filter_init));
+		filter_init.flt_fn = NULL;
+	} else {
+		fw_args.flt_fn = NULL;
+		fw_args.flt_arg = NULL;
+
+		memset(&filter_init, 0, sizeof(filter_init));
+	}
+
+	rval = brz_header_walk(brz, &filter_init, brz_file_fwrite, &fw_args);
+	err = errno;
+
+	brz_free(brz);
+
+	if (rval)
+		errno = err;
+	return rval;
+}
+
+static int brz_file_vfprint(brz_t *brz, brz_uint_t i, FILE *stream)
+{
+	return fprintf(stream, "   %9lld ",
+			       (long long)BRZ_FILE_LEN(brz->header, i)) +
+	       brz_file_fprint(brz, i, stream);
+}
+
+static int brz_file_fprint(brz_t *brz, brz_uint_t i, FILE *stream)
+{
+	return BRZ_FILE_FPRINT(stream, &brz->header->file[i]) +
+	       (fputc('\n', stream) != EOF);
+}
+
+static int brz_fprint_file(FILE *file, int flags,
+			   brz_filter_t *filter, FILE *stream)
+{
+	brz_t *brz;
+	int rval, err;
+
+	if (!(brz = brz_alloc(file)))
+		return -1;
+
+	if ((rval = (flags & BRZ_FLAG_VERBOSE)?
+	    brz_header_walk(brz, filter,
+			    (int (*)(brz_t *, brz_uint_t, void *))
+			    brz_file_vfprint, stream) :
+	    brz_header_walk(brz, filter,
+			    (int (*)(brz_t *, brz_uint_t, void *))
+			    brz_file_fprint, stream)) == -1) {
+		err = errno;
 		goto free;
 	}
 
-	for (i = n = 0; i < p->header.nfiles; n = ++i) {
-		int fd;
-		void *buf;
-		char *dir;
-		size_t file_len = BRZ_FILE_LEN(p, i);
+	if ((rval = brz_skip(brz->file.fp, BRZ_LEN(brz->header)
+					    - brz_header_len(brz->header))))
+		err = errno;
 
-		if (filterfn)
-			switch (filterfn(p->file[i].name, &n, arg)) {
-			case BRZ_FILTER_MATCH:
-				goto skip;
-			case BRZ_FILTER_REPLACE:
-				unlink(p->file[n]._path);
-				if (p->file[n].dir_len > 0) {
-					if ((dir = strndup(p->file[n].dir,
-							   p->file[n].dir_len)))
-					{
-						brz_rmdir_p(dir);
-						free(dir);
-					}
-				}
-			case BRZ_FILTER_NOMATCH:
-			default:
-				break;
-			}
-
-		while ((fd = open(p->file[i]._path, BRZ_OPEN_CREAT,
-				  BRZ_FILE_MODE)) == -1)
-			if (errno != ENOENT ||
-			    (dir = strndup(p->file[i].dir, p->file[i].dir_len))
-				 == NULL ||
-			    (rval = brz_mkdir_p(dir, BRZ_DIR_MODE), free(dir),
-			     rval == -1)) {
-				err = errno;
-				rval = -1;
-				goto skip;
-			}
-
-		if (ftruncate(fd, file_len) ||
-		    (buf = mmap(0, file_len, PROT_WRITE, MAP_SHARED, fd, 0))
-			== MAP_FAILED) {
-			err = errno;
-			rval = -1;
-			goto close;
-		}
-
-		if (!fread(buf, file_len, 1, brz)) {
-			err = ferror(brz)? EIO : EFTYPE;
-			rval = -1;
-		}
-
-		munmap(buf, file_len);
-	close:
-		if (close(fd)) {
-			err = errno;
-			rval = -1;
-		}
-
-		if (rval < 0) {
-	skip:
-			brz_skip(brz, file_len);
-			rval = 0;
-		}
-	}
-
-	if (filter_fini)
-		filter_fini(arg);
 free:
-	brz_free_header(p);
-	if (err) {
+	brz_free(brz);
+	if (rval)
 		errno = err;
-		return -1;
-	}
-	return 0;
+	return rval;
 }
 
-static int brz_fprint_file(FILE *brz, FILE *stream)
+static brz_t *brz_alloc(FILE *stream)
 {
-	brz_uint_t i;
-	brz_header_t *p;
-	int rval;
+	brz_t *brz;
 
-	if (!(p = brz_read_header(brz)))
-		return -1;
+	if ((brz = malloc(sizeof(*brz))) == NULL)
+		return NULL;
 
-	fputs("\tsize name\n", stream);
-	for (i = 0; i < p->header.nfiles; i++) {
-		fprintf(stream, "   %9lld ", (long long)BRZ_FILE_LEN(p, i));
-		if (p->file[i].dir_len > 0)
-			fprintf(stream, "%.*s%c", (int)p->file[i].dir_len,
-					p->file[i].dir, '/');
-		fprintf(stream, "%.*s\n", (int)p->file[i].name_len,
-				p->file[i].name);
+	brz->file.fp = stream;
+
+	if ((brz->header = brz_read_header(stream)) == NULL) {
+		free(brz);
+		return NULL;
 	}
 
-	rval = brz_skip(brz, BRZ_LEN(p) - brz_header_len(p));
-
-	brz_free_header(p);
-	return rval;
+	return brz;
 }
 
 static brz_header_t *brz_read_header(FILE *brz)
@@ -527,18 +580,18 @@ static brz_header_t *brz_read_header(FILE *brz)
 	brz_uint_t i = 0;
 	int err;
 
-	if (!(sp = p = malloc(sizeof(brz_header_t))))
+	if (!(p = malloc(sizeof(brz_header_t))))
 		return NULL;
 
-	if (!fread(p, sizeof(brz_hdr_t), 1, brz))
+	if (!fread(p, sizeof(brz_prefix_t), 1, brz))
 		goto free;
 
-	if (p->header.magic != BRZ_MAGIC) {
+	if (p->prefix.magic != BRZ_MAGIC) {
 		errno = EFTYPE;
 		goto free;
 	}
 
-	if (!(p = realloc(p, BRZ_SIZEOF_HEADER(p)))) {
+	if (!(p = realloc(sp = p, BRZ_SIZEOF_HEADER(p)))) {
 		p = sp;
 		goto free;
 	}
@@ -566,11 +619,11 @@ static brz_header_t *brz_read_header(FILE *brz)
 
 		    (p->file[i].dir_len > 0 &&
 		     (!(p->file[i].dir = realloc(p->file[i]._path,
-						 p->file[i].name_len + 1 +
-						 p->file[i].dir_len + 1)) ||
+						 p->file[i].name_len + 1
+						  + p->file[i].dir_len + 1)) ||
 		      (p->file[i]._path = p->file[i].dir,
-		       p->file[i].name = memmove(p->file[i]._path +
-						  p->file[i].dir_len + 1,
+		       p->file[i].name = memmove(p->file[i]._path
+						  + p->file[i].dir_len + 1,
 						 p->file[i]._path,
 						 p->file[i].name_len + 1),
 		       p->file[i]._path[p->file[i].dir_len] = '\0',
@@ -585,11 +638,11 @@ static brz_header_t *brz_read_header(FILE *brz)
 				err = ENOMEM;
 			else
 				err = EFTYPE;
-			p->header.nfiles = i + 1;
+			p->prefix.nfiles = i + 1;
 			brz_free_header(p);
 			goto error;
 		}
-	} while (i++ < p->header.nfiles);
+	} while (i++ < p->prefix.nfiles);
 
 	return p;
 free:
@@ -599,17 +652,17 @@ error:	errno = err;
 	return NULL;
 }
 
-static size_t brz_write_header(brz_header_t *brz, FILE *stream)
+static size_t brz_write_header(brz_header_t *hdr, FILE *stream)
 {
 	brz_uint_t i = 0;
 	void *p, *buf = NULL;
 	size_t buf_size = 0;
 
-	if (!fwrite(brz, sizeof(brz_hdr_t), 1, stream))
+	if (!fwrite(hdr, sizeof(brz_prefix_t), 1, stream))
 		return 0;
 
 	do {
-		size_t file_hdr_len = BRZ_FILE_HDR_LEN(&brz->file[i]);
+		size_t file_hdr_len = BRZ_FILE_HDR_LEN(&hdr->file[i]);
 
 		if (buf_size < file_hdr_len &&
 		    !(buf = realloc(p = buf, (buf_size = file_hdr_len) + 1))) {
@@ -618,15 +671,15 @@ static size_t brz_write_header(brz_header_t *brz, FILE *stream)
 			return 0;
 		}
 
-		BRZ_FILE_OFFSET(buf) = brz->file[i].offset;
-		BRZ_FILE_NAME(buf).len = brz->file[i].name_len;
-		memcpy(BRZ_FILE_NAME(buf).str, brz->file[i].name,
-		       brz->file[i].name_len);
-		BRZ_FILE_DIR(buf).len = brz->file[i].dir_len;
-		memcpy(BRZ_FILE_DIR(buf).str, brz->file[i].dir,
-		       brz->file[i].dir_len);
+		BRZ_FILE_OFFSET(buf) = hdr->file[i].offset;
+		BRZ_FILE_NAME(buf).len = hdr->file[i].name_len;
+		memcpy(BRZ_FILE_NAME(buf).str, hdr->file[i].name,
+		       hdr->file[i].name_len);
+		BRZ_FILE_DIR(buf).len = hdr->file[i].dir_len;
+		memcpy(BRZ_FILE_DIR(buf).str, hdr->file[i].dir,
+		       hdr->file[i].dir_len);
 
-		BRZ_FILE_DIR(buf).str[brz->file[i].dir_len] = '\0';
+		BRZ_FILE_DIR(buf).str[hdr->file[i].dir_len] = '\0';
 		_brz_path_unix2dos(BRZ_FILE_DIR(buf).str);
 
 		if (!fwrite(buf, file_hdr_len, 1, stream)) {
@@ -634,20 +687,26 @@ static size_t brz_write_header(brz_header_t *brz, FILE *stream)
 			errno = EIO;
 			return 0;
 		}
-	} while (i++ < brz->header.nfiles);
+	} while (i++ < hdr->prefix.nfiles);
 
 	free(buf);
 	return i;
 }
 
-static void brz_free_header(brz_header_t *brz)
+static void brz_free(brz_t *brz)
+{
+	brz_free_header(brz->header);
+	free(brz);
+}
+
+static void brz_free_header(brz_header_t *hdr)
 {
 	brz_uint_t i;
 
-	for (i = 0; i < brz->header.nfiles; i++)
-		brz_free_header_file(&brz->file[i]);
+	for (i = 0; i < hdr->prefix.nfiles; i++)
+		brz_free_header_file(&hdr->file[i]);
 
-	free(brz);
+	free(hdr);
 }
 
 static inline void brz_free_header_file(brz_file_t *file)
@@ -656,66 +715,101 @@ static inline void brz_free_header_file(brz_file_t *file)
 	BRZ_FILE_INIT(file);
 }
 
-static size_t brz_header_len(brz_header_t *brz)
+static size_t brz_header_len(brz_header_t *hdr)
 {
-	size_t len = sizeof(brz->header);
+	size_t len = sizeof(hdr->prefix);
 	brz_uint_t i = 0;
 
 	do
-		len += BRZ_FILE_HDR_LEN(&brz->file[i]);
-	while (i++ < brz->header.nfiles);
+		len += BRZ_FILE_HDR_LEN(&hdr->file[i]);
+	while (i++ < hdr->prefix.nfiles);
 
 	return len;
 }
 
-static int brz_header_lens2offs(brz_header_t *brz)
+static int brz_header_lens2offs(brz_header_t *hdr)
 {
-	brz_off_t len, offset = brz_header_len(brz);
+	brz_off_t len, offset = brz_header_len(hdr);
 	brz_uint_t i = 0;
 
 	do {
-		len = brz->file[i].offset;
-		brz->file[i].offset = offset;
-	} while (i++ < brz->header.nfiles &&
+		len = hdr->file[i].offset;
+		hdr->file[i].offset = offset;
+	} while (i++ < hdr->prefix.nfiles &&
 		 !__builtin_add_overflow(len, offset, &offset));
 
-	return -(i <= brz->header.nfiles);
+	return -(i <= hdr->prefix.nfiles);
 }
 
-static brz_uint_t brz_header_filter(brz_header_t *brz,
-				    filterfn_t *filterfn,
-				    void *filter_args)
+static ssize_t brz_header_filter(brz_header_t *hdr, brz_filter_t *filter)
 {
-	brz_uint_t i;
-	size_t n;
+	if (!filter)
+		return hdr->prefix.nfiles;
 
-	if (!filterfn)
-		return brz->header.nfiles;
+	if (filter->flt_init &&
+	    filter->flt_init(hdr->prefix.nfiles, filter->flt_arg))
+		return -1;
 
-	for (i = n = 0; i < brz->header.nfiles; n = ++i)
-		switch (filterfn(brz->file[i].name, &n, filter_args)) {
-		case BRZ_FILTER_REPLACE:
-		case BRZ_FILTER_MATCH:
-			if (n <= i)
-				brz_free_header_file(&brz->file[n]);
-			break;
-		case BRZ_FILTER_NOMATCH:
-		default:
-			break;
+	if (filter->flt_fn) {
+		brz_uint_t i = hdr->prefix.nfiles;
+		brz_uint_t j = 0;
+
+		do {
+			if (i > 0 &&
+			    filter->flt_fn(hdr->file[i-1].name, i-1,
+					   filter->flt_arg) == BRZ_FLT_MATCH) {
+				if (!j) j = i;
+				continue;
+			}
+
+			if (j) {
+				memmove(&hdr->file[i], &hdr->file[j],
+					(hdr->prefix.nfiles - j + 1)
+					 * sizeof(brz_file_t));
+				hdr->prefix.nfiles -= j - i;
+				j = 0;
+			}
+		} while (i-- > 0);
+	}
+
+	if (filter->flt_fini)
+		filter->flt_fini(filter->flt_arg);
+
+	return hdr->prefix.nfiles;
+}
+
+static ssize_t brz_header_walk(brz_t *brz,
+			       brz_filter_t *filter,
+			       int (*fn)(brz_t *, brz_uint_t, void *),
+			       void *fn_arg)
+{
+	brz_uint_t i, n;
+
+	if (filter && filter->flt_init &&
+	    filter->flt_init(brz->header->prefix.nfiles, filter->flt_arg))
+		return -1;
+
+	if (filter && filter->flt_fn) {
+		i = brz->header->prefix.nfiles;
+		while (i > 0) {
+			i--;
+			filter->flt_fn(brz->header->file[i].name, i,
+				       filter->flt_arg);
+		}
+	}
+
+	for (i = n = 0; i < brz->header->prefix.nfiles; i++)
+		if (!filter || !filter->flt_fn ||
+		    filter->flt_fn(brz->header->file[i].name, i,
+				   filter->flt_arg) == BRZ_FLT_NOMATCH) {
+			fn(brz, i, fn_arg);
+			n++;
 		}
 
-	for (i = 0; i < brz->header.nfiles; i++)
-		if (!brz->file[i].name_len) {
-			for (n = i + 1;
-			     n < brz->header.nfiles && !brz->file[n].name_len;
-			     n++);
-			memmove(&brz->file[i], &brz->file[n],
-				(void *)&brz->file[brz->header.nfiles + 1]
-				- (void *)&brz->file[n]);
-			brz->header.nfiles -= n - i;
-		}
+	if (filter && filter->flt_fini)
+		filter->flt_fini(filter->flt_arg);
 
-	return brz->header.nfiles;
+	return n;
 }
 
 static void _brz_path_dos2unix(char *path)

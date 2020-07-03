@@ -1,6 +1,6 @@
 /* brz_filter.c -- filter CMx2 BRZ resource files
 
-   Copyright (C) 2013-2018 Michal Roszkowski
+   Copyright (C) 2013-2020 Michal Roszkowski
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -24,31 +24,29 @@
 
 #define FNM_FLAGS	(FNM_CASEFOLD)
 
-int brz_filter(const char *filename, size_t *i, void *arg)
+int brz_filter(const char *filename, size_t i, void *arg)
 {
 	brz_filter_args_t *args = arg;
 	ENTRY e, *ep;
-	size_t prev;
 
 	if ((args->excl && !fnmatch(args->excl, filename, FNM_FLAGS)) ||
 	    (args->incl && fnmatch(args->incl, filename, FNM_FLAGS)))
-		return BRZ_FILTER_MATCH;
+		return BRZ_FLT_MATCH;
 
 	if (!(args->flags & BRZ_FILTER_FLAG_KEEPDUPS)) {
 		e.key = (char *)filename;
 		if ((ep = hsearch(e, FIND))) {
-			prev = (typeof(*i))(uintptr_t)ep->data;
-			ep->data = (void *)(uintptr_t)*i;
-			*i = prev;
-			return BRZ_FILTER_REPLACE;
+			return (i == (typeof(i))(uintptr_t)ep->data)?
+				BRZ_FLT_NOMATCH :
+				BRZ_FLT_MATCH;
 		} else {
 			e.key = strdup(filename);
-			e.data = (void *)(uintptr_t)*i;
+			e.data = (void *)(uintptr_t)i;
 			hsearch(e, ENTER);
 		}
 	}
 
-	return BRZ_FILTER_NOMATCH;
+	return BRZ_FLT_NOMATCH;
 }
 
 

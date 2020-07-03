@@ -1,6 +1,6 @@
 /* brz_filter.h -- filter CMx2 BRZ resource files
 
-   Copyright (C) 2013-2018 Michal Roszkowski
+   Copyright (C) 2013-2020 Michal Roszkowski
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -30,7 +30,7 @@ typedef struct {
 	unsigned int flags;
 } brz_filter_args_t;
 
-int brz_filter(const char *filename, size_t *i, void *arg);
+int brz_filter(const char *filename, size_t i, void *arg);
 int brz_filter_init(size_t n, void *arg);
 void brz_filter_fini(void *arg);
 

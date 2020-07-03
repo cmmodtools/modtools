@@ -1,6 +1,6 @@
 /* brz.h -- manipulate CMx2 BRZ resource files
 
-   Copyright (C) 2013-2018 Michal Roszkowski
+   Copyright (C) 2013-2020 Michal Roszkowski
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -21,28 +21,34 @@
 
 #include <stdint.h>
 
-#define BRZ_FILTER_REPLACE      -1
-#define BRZ_FILTER_NOMATCH      0
-#define BRZ_FILTER_MATCH        1
+#define BRZ_FLAG_VERBOSE	1
 
-typedef int (filterfn_t)(const char *filename, size_t *i, void *args);
-typedef int (filter_init_t)(size_t n, void *args);
-typedef void (filter_fini_t)(void *args);
+#define BRZ_FLT_NOMATCH		0
+#define BRZ_FLT_MATCH		1
 
-int brz_explode(char *const *pathv,
-		const char *explode_dir,
-		filterfn_t *filterfn,
-		filter_init_t *filter_init,
-		filter_fini_t *filter_fini,
-		void *filter_args);
+typedef int (flt_fn_t)(const char *filename, size_t i, void *args);
+typedef int (flt_init_t)(size_t n, void *args);
+typedef void (flt_fini_t)(void *args);
+
+typedef struct {
+	flt_fn_t	*flt_fn;
+	flt_init_t	*flt_init;	/* constructor */
+	flt_fini_t	*flt_fini;	/* destructor */
+	void 		*flt_arg;
+} brz_filter_t;
+
+int brz_extract(char *const *pathv,
+		int flags,
+		brz_filter_t *filter,
+		const char *out_dir);
 
 int brz_pack(char *const *pathv,
-	     const char *pack_file,
-	     filterfn_t *filterfn,
-	     filter_init_t *filter_init,
-	     filter_fini_t *filter_fini,
-	     void *filter_args);
+	     int flags,
+	     brz_filter_t *filter,
+	     const char *out_file);
 
-int brz_list(char *const *pathv);
+int brz_list(char *const *pathv,
+	     int flags,
+	     brz_filter_t *filter);
 
 #endif /* _BRZ_H_ */
