@@ -1,5 +1,5 @@
 CC=cc
-CFLAGS=-Wall -O2 -mmacosx-version-min=10.6 -arch x86_64
+CFLAGS=-Wall -O2 -mmacosx-version-min=10.6 -arch x86_64 -arch arm64
 
 prefix=/usr/local
 
