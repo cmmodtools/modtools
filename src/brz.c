@@ -1,6 +1,6 @@
 /* brz.c -- manipulate CMx2 BRZ resource files
 
-   Copyright (C) 2013-2020 Michal Roszkowski
+   Copyright (C) 2013-2021 Michal Roszkowski
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -17,6 +17,7 @@
    Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.  */
 
 #include <sys/mman.h>
+#include <sys/param.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -44,11 +45,13 @@ typedef uint32_t brz_uint_t;
 typedef  int32_t brz_int_t;
 typedef  int32_t brz_off_t;
 
-#define BRZ_SIZEOF_STR(s)	(sizeof(brz_str_t) + (s)->len)
+#define BRZ_FILES_MAX		MIN((SIZE_MAX - sizeof(brz_header_t))	\
+				 / sizeof(brz_file_t), (brz_uint_t)-1)
 #define BRZ_SIZEOF_HEADER(h) 	(sizeof(brz_header_t) +			\
-				 sizeof(brz_file_t) * (h)->prefix.nfiles)
+				 sizeof(brz_file_t) * (h)->nfiles)
+#define BRZ_SIZEOF_STR(s)	(sizeof(brz_str_t) + (s)->len)
 
-#define BRZ_LEN(h)		((h)->file[(h)->prefix.nfiles].offset)
+#define BRZ_LEN(h)		((h)->file[(h)->nfiles].offset)
 #define BRZ_FILE_LEN(h, n)	(((h)->file[(n) + 1].offset) -		\
 				 ((h)->file[n].offset))
 
@@ -56,19 +59,15 @@ typedef  int32_t brz_off_t;
 				 sizeof((f)->name_len) + (f)->name_len +\
 				 sizeof((f)->dir_len) +	(f)->dir_len)
 
-#define BRZ_FILE_OFFSET(f)	(*(brz_off_t *)(f))
-#define BRZ_FILE_NAME(f)	(*(brz_str_t *)(&BRZ_FILE_OFFSET(f) + 1))
-#define BRZ_FILE_DIR(f)		(*(brz_str_t *)((void *)&BRZ_FILE_NAME(f) + \
-				 BRZ_SIZEOF_STR(&BRZ_FILE_NAME(f))))
-
 #define BRZ_FILE_FPRINT(s, f)	fprintf((s), "%.*s%c%.*s",		\
 					     (int)(f)->dir_len, (f)->dir, \
 					     (f)->dir_len > 0? '/':'\0',\
 					     (int)(f)->name_len, (f)->name)
 
-#define BRZ_PREFIX_INIT(p)	do {					\
+#define BRZ_INIT(p)		do {					\
 					(p)->magic = BRZ_MAGIC;		\
 					(p)->nfiles = 0;		\
+					BRZ_FILE_INIT(&(p)->file[0]);	\
 				} while (0)
 
 #define BRZ_FILE_INIT(f)	do {					\
@@ -76,10 +75,24 @@ typedef  int32_t brz_off_t;
 					(f)->_path = NULL;		\
 				} while (0)
 
-typedef struct __attribute__((packed)) {
-	brz_uint_t magic;
-	brz_uint_t nfiles;
-} brz_prefix_t;
+#define BRZ_DEC(le, he)	do {						\
+				uint8_t const *_le = (uint8_t const *)(le); \
+				unsigned _i = 0;			\
+				(he) = 0;				\
+				do					\
+					(he) |= _le[_i] << (_i*8);	\
+				while (++_i < sizeof(he));		\
+				(le) = (typeof(le))&_le[_i];		\
+			} while (0)
+
+#define BRZ_ENC(le, he)	do {						\
+				uint8_t *_le = (uint8_t *)(le);		\
+				unsigned _i = 0;			\
+				do					\
+					_le[_i] = ((he) >> (_i*8)) & 0xff; \
+				while (++_i < sizeof(he));		\
+				(le) = (typeof(le))&_le[_i];		\
+			} while (0)
 
 typedef struct {
 	brz_off_t offset;
@@ -91,7 +104,8 @@ typedef struct {
 } brz_file_t;
 
 typedef struct {
-	brz_prefix_t prefix;
+	brz_uint_t magic;
+	brz_uint_t nfiles;
 	brz_file_t file[1];
 } brz_header_t;
 
@@ -108,6 +122,10 @@ typedef struct __attribute__((packed)) {
 	char str[];
 } brz_str_t;
 
+static inline brz_uint_t brz_decode_int(void *le);
+static inline brz_off_t brz_decode_offset(void *le);
+static inline brz_strlen_t brz_decode_strlen(void *le);
+static inline void brz_free_header_file(brz_file_t *file);
 static int brz_extract_ftsent(FTS *fts, FTSENT *f, void *arg);
 static int brz_add_ftsent(FTS *fts, FTSENT *f, void *arg);
 static int brz_fprint_ftsent(FTS *fts, FTSENT *f, void *arg);
@@ -121,8 +139,8 @@ static brz_t *brz_alloc(FILE *stream);
 static void brz_free(brz_t *brz);
 static brz_header_t *brz_read_header(FILE *brz);
 static size_t brz_write_header(brz_header_t *hdr, FILE *stream);
+static void *brz_encode_file_hdr(void *dst, brz_file_t *file);
 static void brz_free_header(brz_header_t *hdr);
-static inline void brz_free_header_file(brz_file_t *file);
 static size_t brz_header_len(brz_header_t *hdr);
 static int brz_header_lens2offs(brz_header_t *hdr);
 static ssize_t brz_header_filter(brz_header_t *hdr, brz_filter_t *filter);
@@ -130,9 +148,6 @@ static ssize_t brz_header_walk(brz_t *brz,
 			       brz_filter_t *filter,
 			       int (*fn)(brz_t *, brz_uint_t, void *),
 			       void *fn_arg);
-static void _brz_replace_ch(char *s, int old_ch, int new_ch);
-static void _brz_path_dos2unix(char *path);
-static void _brz_path_unix2dos(char *path);
 
 struct extract_args {
 	int flags;
@@ -209,8 +224,7 @@ int brz_pack(char *const *pathv,
 	if (!(p = malloc(sizeof(brz_header_t))))
 		return -1;
 
-	BRZ_PREFIX_INIT(&p->prefix);
-	BRZ_FILE_INIT(&p->file[0]);
+	BRZ_INIT(p);
 
 	if (fts_tree_walk(pathv, brz_add_ftsent, &p) ||
 	      brz_header_filter(p, filter) == -1) {
@@ -234,7 +248,7 @@ int brz_pack(char *const *pathv,
 	}
 
 	for (i = 0, stream = (file == stdout)? stderr : stdout;
-	     !err && i < p->prefix.nfiles;
+	     !err && i < p->nfiles;
 	     i++) {
 		len = BRZ_FILE_LEN(p, i);
 
@@ -360,25 +374,26 @@ static int brz_add_ftsent(FTS *fts, FTSENT *f, void *arg)
 		return 0;
 
 	/* check for overflow */
-	if (sizeof((*hdr)->file->offset < sizeof(f->fts_statp->st_size)) &&
-	   (typeof((*hdr)->file->offset))f->fts_statp->st_size !=
-					 f->fts_statp->st_size) {
+	if ((*hdr)->nfiles == BRZ_FILES_MAX ||
+	    (sizeof((*hdr)->file->offset < sizeof(f->fts_statp->st_size)) &&
+	    (typeof((*hdr)->file->offset))f->fts_statp->st_size !=
+					  f->fts_statp->st_size)) {
 		errno = EFBIG;
 		return -1;
 	}
 
-	(*hdr)->prefix.nfiles++;
+	(*hdr)->nfiles++;
 	if ((*hdr = realloc(sp = *hdr, BRZ_SIZEOF_HEADER(*hdr))) == NULL) {
-		(*hdr = sp)->prefix.nfiles--;
+		(*hdr = sp)->nfiles--;
 		return -1;
 	}
 
-	file = &(*hdr)->file[(*hdr)->prefix.nfiles - 1];
-	BRZ_FILE_INIT(&(*hdr)->file[(*hdr)->prefix.nfiles]);
+	file = &(*hdr)->file[(*hdr)->nfiles - 1];
+	BRZ_FILE_INIT(&(*hdr)->file[(*hdr)->nfiles]);
 
 	if ((file->_path = malloc(f->fts_pathlen + 1)) == NULL) {
 		errno = ENOMEM;
-		(*hdr)->prefix.nfiles--;
+		(*hdr)->nfiles--;
 		return -1;
 	}
 
@@ -583,11 +598,20 @@ static brz_header_t *brz_read_header(FILE *brz)
 	if (!(p = malloc(sizeof(brz_header_t))))
 		return NULL;
 
-	if (!fread(p, sizeof(brz_prefix_t), 1, brz))
+	if (!fread(&p->magic, sizeof(p->magic), 1, brz) ||
+	    !fread(&p->nfiles, sizeof(p->nfiles), 1, brz))
 		goto free;
 
-	if (p->prefix.magic != BRZ_MAGIC) {
+	p->magic = brz_decode_int(&p->magic);
+	p->nfiles = brz_decode_int(&p->nfiles);
+
+	if (p->magic != BRZ_MAGIC) {
 		errno = EFTYPE;
+		goto free;
+	}
+
+	if (p->nfiles > BRZ_FILES_MAX) {
+		errno = EFBIG;
 		goto free;
 	}
 
@@ -599,11 +623,15 @@ static brz_header_t *brz_read_header(FILE *brz)
 	do {
 		BRZ_FILE_INIT(&p->file[i]);
 
-		if (!fread(&p->file[i].offset,
-			   sizeof(p->file[i].offset), 1, brz) ||
+		if ((!fread(&p->file[i].offset,
+			    sizeof(p->file[i].offset), 1, brz) ||
+		     (p->file[i].offset =
+			brz_decode_offset(&p->file[i].offset), 0)) ||
 
-		    !fread(&p->file[i].name_len,
-			   sizeof(p->file[i].name_len), 1, brz) ||
+		    (!fread(&p->file[i].name_len,
+			    sizeof(p->file[i].name_len), 1, brz) ||
+		     (p->file[i].name_len =
+			brz_decode_strlen(&p->file[i].name_len), 0)) ||
 		    p->file[i].name_len > NAME_MAX ||
 
 		    (p->file[i].name_len > 0 &&
@@ -613,8 +641,10 @@ static brz_header_t *brz_read_header(FILE *brz)
 		       !fread(p->file[i].name, p->file[i].name_len, 1, brz)) ||
 		      p->file[i].name != brz_basename(p->file[i].name))) ||
 
-		    !fread(&p->file[i].dir_len,
-			   sizeof(p->file[i].dir_len), 1, brz) ||
+		    (!fread(&p->file[i].dir_len,
+			    sizeof(p->file[i].dir_len), 1, brz) ||
+		     (p->file[i].dir_len =
+			brz_decode_strlen(&p->file[i].dir_len), 0)) ||
 		    p->file[i].dir_len >= PATH_MAX - p->file[i].name_len - 1 ||
 
 		    (p->file[i].dir_len > 0 &&
@@ -628,7 +658,7 @@ static brz_header_t *brz_read_header(FILE *brz)
 						 p->file[i].name_len + 1),
 		       p->file[i]._path[p->file[i].dir_len] = '\0',
 		       !fread(p->file[i].dir, p->file[i].dir_len, 1, brz)) ||
-		      (_brz_path_dos2unix(p->file[i].dir),
+		      (brz_path_dos2unix(p->file[i].dir, p->file[i].dir_len),
 		       p->file[i].dir_len != brz_realpath(p->file[i].dir)) ||
 		      (p->file[i]._path[p->file[i].dir_len] = '/', 0)))) {
 			if (ferror(brz) || feof(brz))
@@ -638,11 +668,11 @@ static brz_header_t *brz_read_header(FILE *brz)
 				err = ENOMEM;
 			else
 				err = EFTYPE;
-			p->prefix.nfiles = i + 1;
+			p->nfiles = i + 1;
 			brz_free_header(p);
 			goto error;
 		}
-	} while (i++ < p->prefix.nfiles);
+	} while (i++ < p->nfiles);
 
 	return p;
 free:
@@ -652,45 +682,80 @@ error:	errno = err;
 	return NULL;
 }
 
+static inline brz_uint_t brz_decode_int(void *le)
+{
+	brz_uint_t he;
+	BRZ_DEC(le, he);
+	return he;
+}
+
+static inline brz_off_t brz_decode_offset(void *le)
+{
+	brz_off_t he;
+	BRZ_DEC(le, he);
+	return he;
+}
+
+static inline brz_strlen_t brz_decode_strlen(void *le)
+{
+	brz_strlen_t he;
+	BRZ_DEC(le, he);
+	return he;
+}
+
 static size_t brz_write_header(brz_header_t *hdr, FILE *stream)
 {
 	brz_uint_t i = 0;
-	void *p, *buf = NULL;
-	size_t buf_size = 0;
+	void *p, *buf;
+	size_t buf_size;
 
-	if (!fwrite(hdr, sizeof(brz_prefix_t), 1, stream))
+	if ((buf = p = malloc(buf_size = sizeof(brz_header_t))) == NULL)
 		return 0;
+
+	BRZ_ENC(p, hdr->magic);
+	BRZ_ENC(p, hdr->nfiles);
+
+	if (!fwrite(buf, sizeof(hdr->magic) + sizeof(hdr->nfiles), 1, stream)) {
+		free(buf);
+		errno = EIO;
+		return 0;
+	}
 
 	do {
 		size_t file_hdr_len = BRZ_FILE_HDR_LEN(&hdr->file[i]);
 
 		if (buf_size < file_hdr_len &&
-		    !(buf = realloc(p = buf, (buf_size = file_hdr_len) + 1))) {
+		    !(buf = realloc(p = buf, buf_size = file_hdr_len))) {
 			free(p);
 			errno = ENOMEM;
 			return 0;
 		}
 
-		BRZ_FILE_OFFSET(buf) = hdr->file[i].offset;
-		BRZ_FILE_NAME(buf).len = hdr->file[i].name_len;
-		memcpy(BRZ_FILE_NAME(buf).str, hdr->file[i].name,
-		       hdr->file[i].name_len);
-		BRZ_FILE_DIR(buf).len = hdr->file[i].dir_len;
-		memcpy(BRZ_FILE_DIR(buf).str, hdr->file[i].dir,
-		       hdr->file[i].dir_len);
-
-		BRZ_FILE_DIR(buf).str[hdr->file[i].dir_len] = '\0';
-		_brz_path_unix2dos(BRZ_FILE_DIR(buf).str);
+		brz_encode_file_hdr(buf, &hdr->file[i]);
 
 		if (!fwrite(buf, file_hdr_len, 1, stream)) {
 			free(buf);
 			errno = EIO;
 			return 0;
 		}
-	} while (i++ < hdr->prefix.nfiles);
+	} while (i++ < hdr->nfiles);
 
 	free(buf);
 	return i;
+}
+
+static void *brz_encode_file_hdr(void *dst, brz_file_t *file)
+{
+	void *p = dst;
+
+	BRZ_ENC(p, file->offset);
+	BRZ_ENC(p, file->name_len);
+	p = memcpy(p, file->name, file->name_len) + file->name_len;
+	BRZ_ENC(p, file->dir_len);
+	memcpy(p, file->dir, file->dir_len);
+	brz_path_unix2dos(p, file->dir_len);
+
+	return dst;
 }
 
 static void brz_free(brz_t *brz)
@@ -703,7 +768,7 @@ static void brz_free_header(brz_header_t *hdr)
 {
 	brz_uint_t i;
 
-	for (i = 0; i < hdr->prefix.nfiles; i++)
+	for (i = 0; i < hdr->nfiles; i++)
 		brz_free_header_file(&hdr->file[i]);
 
 	free(hdr);
@@ -717,12 +782,12 @@ static inline void brz_free_header_file(brz_file_t *file)
 
 static size_t brz_header_len(brz_header_t *hdr)
 {
-	size_t len = sizeof(hdr->prefix);
+	size_t len = sizeof(hdr->magic) + sizeof(hdr->nfiles);
 	brz_uint_t i = 0;
 
 	do
 		len += BRZ_FILE_HDR_LEN(&hdr->file[i]);
-	while (i++ < hdr->prefix.nfiles);
+	while (i++ < hdr->nfiles);
 
 	return len;
 }
@@ -735,23 +800,23 @@ static int brz_header_lens2offs(brz_header_t *hdr)
 	do {
 		len = hdr->file[i].offset;
 		hdr->file[i].offset = offset;
-	} while (i++ < hdr->prefix.nfiles &&
+	} while (i++ < hdr->nfiles &&
 		 !__builtin_add_overflow(len, offset, &offset));
 
-	return -(i <= hdr->prefix.nfiles);
+	return -(i <= hdr->nfiles);
 }
 
 static ssize_t brz_header_filter(brz_header_t *hdr, brz_filter_t *filter)
 {
 	if (!filter)
-		return hdr->prefix.nfiles;
+		return hdr->nfiles;
 
 	if (filter->flt_init &&
-	    filter->flt_init(hdr->prefix.nfiles, filter->flt_arg))
+	    filter->flt_init(hdr->nfiles, filter->flt_arg))
 		return -1;
 
 	if (filter->flt_fn) {
-		brz_uint_t i = hdr->prefix.nfiles;
+		brz_uint_t i = hdr->nfiles;
 		brz_uint_t j = 0;
 
 		do {
@@ -764,9 +829,9 @@ static ssize_t brz_header_filter(brz_header_t *hdr, brz_filter_t *filter)
 
 			if (j) {
 				memmove(&hdr->file[i], &hdr->file[j],
-					(hdr->prefix.nfiles - j + 1)
+					(hdr->nfiles - j + 1)
 					 * sizeof(brz_file_t));
-				hdr->prefix.nfiles -= j - i;
+				hdr->nfiles -= j - i;
 				j = 0;
 			}
 		} while (i-- > 0);
@@ -775,7 +840,7 @@ static ssize_t brz_header_filter(brz_header_t *hdr, brz_filter_t *filter)
 	if (filter->flt_fini)
 		filter->flt_fini(filter->flt_arg);
 
-	return hdr->prefix.nfiles;
+	return hdr->nfiles;
 }
 
 static ssize_t brz_header_walk(brz_t *brz,
@@ -786,11 +851,11 @@ static ssize_t brz_header_walk(brz_t *brz,
 	brz_uint_t i, n;
 
 	if (filter && filter->flt_init &&
-	    filter->flt_init(brz->header->prefix.nfiles, filter->flt_arg))
+	    filter->flt_init(brz->header->nfiles, filter->flt_arg))
 		return -1;
 
 	if (filter && filter->flt_fn) {
-		i = brz->header->prefix.nfiles;
+		i = brz->header->nfiles;
 		while (i > 0) {
 			i--;
 			filter->flt_fn(brz->header->file[i].name, i,
@@ -798,7 +863,7 @@ static ssize_t brz_header_walk(brz_t *brz,
 		}
 	}
 
-	for (i = n = 0; i < brz->header->prefix.nfiles; i++)
+	for (i = n = 0; i < brz->header->nfiles; i++)
 		if (!filter || !filter->flt_fn ||
 		    filter->flt_fn(brz->header->file[i].name, i,
 				   filter->flt_arg) == BRZ_FLT_NOMATCH) {
@@ -810,20 +875,4 @@ static ssize_t brz_header_walk(brz_t *brz,
 		filter->flt_fini(filter->flt_arg);
 
 	return n;
-}
-
-static void _brz_path_dos2unix(char *path)
-{
-	_brz_replace_ch(path, '\\', '/');
-}
-
-static void _brz_path_unix2dos(char *path)
-{
-	_brz_replace_ch(path, '/', '\\');
-}
-
-static void _brz_replace_ch(char *s, int old_ch, int new_ch)
-{
-	while ((s = strchr(s, old_ch)))
-		*s++ = new_ch;
 }

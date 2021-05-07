@@ -1,6 +1,6 @@
 /* brz_utils.c -- file utilities
 
-   Copyright (C) 2013-2018 Michal Roszkowski
+   Copyright (C) 2013-2021 Michal Roszkowski
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -36,6 +36,7 @@
 
 static unsigned char skip_buf[PIPE_BUF];
 
+static void _brz_replace_ch(char *s, int old_c, int new_c, size_t n);
 static int _brz_pathcat(char *dst, const char *dir, const char *name);
 static int _brz_remove_ftsent(FTS *fts, FTSENT *f, void *arg);
 static int _brz_fts_compar(const FTSENT **f1, const FTSENT **f2);
@@ -149,6 +150,16 @@ char *brz_basename_s(char *path)
 	return path;
 }
 
+void brz_path_dos2unix(char *path, size_t n)
+{
+	_brz_replace_ch(path, '\\', '/', n);
+}
+
+void brz_path_unix2dos(char *path, size_t n)
+{
+	_brz_replace_ch(path, '/', '\\', n);
+}
+
 int brz_realpath(char *path)
 {
 	char *p, *clpse, *dir;
@@ -194,7 +205,7 @@ int brz_realpath(char *path)
 
 int brz_skip(FILE *stream, size_t len)
 {
-	int n;
+	size_t n;
 
 	if (fseek(stream, len, SEEK_CUR) == 0)
 		return 0;
@@ -270,6 +281,14 @@ static int _brz_remove_ftsent(FTS *fts, FTSENT *f, void *arg)
 	}
 }
 
+static void _brz_replace_ch(char *s, int old_c, int new_c, size_t n)
+{
+	char *endp = s + n;
+
+	while ((s = memchr(s, old_c, endp - s)) != NULL)
+		*s++ = new_c;
+}
+
 static int _brz_pathcat(char *dst, const char *dir, const char *name)
 {
 	size_t namelen, dirlen = 0;
@@ -293,4 +312,3 @@ static int _brz_pathcat(char *dst, const char *dir, const char *name)
 	memcpy(dst + dirlen, name, namelen);
 	return 0;
 }
-

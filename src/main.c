@@ -1,6 +1,6 @@
 /* main.c -- rezexplode and rezpack CMx2 BRZ resource files
 
-   Copyright (C) 2013-2020 Michal Roszkowski
+   Copyright (C) 2013-2021 Michal Roszkowski
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -36,7 +36,7 @@
 
 #define IS_STDIO(s) (strcmp((s), REZ_STDIO_FILE) == 0)
 
-#define VERSION "1.3.1 Copyright (C) 2013-2020 by Michal Roszkowski"
+#define VERSION "1.3.2 Copyright (C) 2013-2021 by Michal Roszkowski"
 
 static const char *progname;
 static char *cwd, *working;

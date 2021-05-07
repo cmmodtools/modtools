@@ -1,6 +1,6 @@
 /* brz_utils.h -- file utilities
 
-   Copyright (C) 2013-2018 Michal Roszkowski
+   Copyright (C) 2013-2021 Michal Roszkowski
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -42,6 +42,8 @@ int brz_remove_r(char *const path);
 char *brz_dirname(char *path);
 char *brz_basename(const char *path);
 char *brz_basename_s(char *path);
+void brz_path_dos2unix(char *path, size_t n);
+void brz_path_unix2dos(char *path, size_t n);
 int brz_realpath(char *path);
 int brz_skip(FILE *stream, size_t len);
 int is_brz_file(FTSENT *p);
